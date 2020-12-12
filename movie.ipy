@@ -1,0 +1,159 @@
+import warnings 
+warnings.filterwarnings("ignore")
+%autosave 150
+%matplotlib inline
+import pandas as pd
+import numpy as np
+import math
+import matplotlib.pylab as plt
+from scipy.stats import pearsonr
+from sklearn.metrics import mean_squared_error
+from math import sqrt
+file='the-movies-dataset/'
+
+cols_ratings = ['userId', 'movieId', 'rating']
+ratings = pd.read_csv(file+'ratings_small.csv', usecols=cols_ratings)
+ratings=ratings.rename(columns={"userId": "user_id","movieId":"movie_id"})
+ratings['movie_id'] = ratings['movie_id'].astype('str')
+
+cols_titles = ['id', 'original_title']
+titles = pd.read_csv(file+'movies_metadata.csv', usecols=cols_titles)
+titles=titles.rename(columns={"id": "movie_id","original_title":"title"})
+data = pd.merge(ratings, titles)
+def overview(df):
+    print('SHAPE:\n',df.shape)
+    print('COLUMN NAMES:\n', df.columns.tolist())
+    print('UNIQUE VALUES PER COLUMN:\n', df.nunique())
+    print('COLUMNS WITH MISSING DATA:\n',df.isnull().sum())
+    print('SAMPLE:\n',df.sample(10))
+    print('INFO:\n',df.info())
+overview(data)
+def assign_to_testset(df):
+    sampled_ids = np.random.choice(df.index,size=np.int64(np.ceil(df.index.size * 0.2)),replace=False)
+    df.loc[sampled_ids, 'for_testing'] = True
+    return df
+
+data['for_testing'] = False
+grouped = data.groupby('user_id', group_keys=False).apply(assign_to_testset)
+data_train = data[grouped.for_testing == False]
+data_test = data[grouped.for_testing == True]
+print(data_train.shape)
+print(data_test.shape)
+print(data_train.index & data_test.index)
+
+print("Training data_set has *"+ str(data_train.shape[0]) +"* ratings")
+print("Test data set has *"+ str(data_test.shape[0]) +"* ratings")
+#find similarity between the users
+def SimPearson(df,user1,user2,items_min=1):
+    #movies rated by of user1
+    data_user1=df[df['user_id']==user1]
+    #movies rated by of user2
+    data_user2=df[df['user_id']==user2]
+    
+    #movies rated by both
+    both_rated=pd.merge(data_user1,data_user2,on='movie_id')
+    
+    if len(both_rated)<2:
+        return 0
+    if len(both_rated)<items_min:
+        return 0
+    res=pearsonr(both_rated.rating_x,both_rated.rating_y)[0]
+    if(np.isnan(res)):
+        return 0
+    return res
+#using small sample of dataset
+minidata = data[data['user_id']<100] # get only data from 100 users
+print(minidata.shape)
+
+minidata.loc[:,'for_testing'] = False
+grouped = minidata.groupby('user_id', group_keys=False).apply(assign_to_testset)
+minidata_train = minidata[grouped.for_testing == False]
+minidata_test = minidata[grouped.for_testing == True]
+
+print(minidata_train.shape )
+print(minidata_test.shape )
+
+print('users:', minidata.user_id.nunique() )
+print('movies:',minidata.movie_id.nunique() )
+class CF: #Collaborative Filtering
+    def __init__ (self,df,simfunc):
+        self.df=df
+        self.simfunc=simfunc
+        self.sim = pd.DataFrame(np.sum([0]),columns=data_train.user_id.unique(), index=data_train.user_id.unique())
+        
+    def compute_similarities(self):
+        allusers=set(self.df.user_id)
+        self.sim = {} #we are going to create a dictionary with the calculated similarities between users
+        for user1 in allusers:
+            self.sim.setdefault(user1, {})
+            #we take all the movies whatched by user1
+            movies_user1=data_train[data_train['user_id']==user1]['movie_id']
+             #we take all the users that have whatched any of the movies user1 has
+            data_mini=pd.merge(data_train,movies_user1,on='movie_id')
+            
+            for user2 in allusers:
+                if user1==user2:continue
+                self.sim.setdefault(user2, {})
+                if (user1 in self.sim[user2]):continue
+                # we calculate the similarity between user1 and user2
+                simi=self.simfunc(data_mini,user1,user2)
+                if (simi<0):
+                    self.sim[user1][user2]=0
+                    self.sim[user2][user1]=0
+                else: # we store the similarity in the dictionary
+                    self.sim[user1][user2]=simi
+                    self.sim[user2][user1]=simi
+        return self.sim
+    
+    def predict(self,user,movie):
+        allratings=self.df[(self.df['movie_id']==movie)]
+        allusers_movie=set(allratings.user_id)
+        
+        numerator=0.0
+        denominator=0.0
+        
+        for u in allusers_movie:
+            if u==user:continue
+            #we calculate the numerator and denominator of the prediction formula we saw at the beginning
+            numerator+=self.sim[user][u]*float(allratings[allratings['user_id']==u]['rating'])
+            denominator+=self.sim[user][u]
+                
+        if denominator==0: 
+            if self.df.rating[self.df['movie_id']==movie].mean()>0:
+            # if the sum of similarities is 0 we use the mean of ratings for that movie
+                return self.df.rating[self.df['movie_id']==movie].mean()
+            else:
+            # else return mean rating for that user
+                return self.df.rating[self.df['user_id']==user].mean()
+        
+        return numerator/denominator
+CF_userbased=CF(df=minidata_train,simfunc=SimPearson)
+dicsim=CF_userbased.compute_similarities()
+#similary between user id 2 and all others
+print(dicsim[2])
+example_pred=CF_userbased.predict(user=13,movie=1)
+print(example_pred)
+def evaluation(dftest):
+    
+    preds_test=[]
+    for user in set(dftest.user_id):
+        for movie in set(dftest[dftest['user_id']==user]['movie_id'].tolist()):
+            pred=CF_userbased.predict(user=user,movie=movie)
+            preds_test.append(
+            {
+                'user_id':user,
+                'movie_id':movie,
+                'pred_rating':pred
+            }
+        )
+            
+    pred_ratings=pd.DataFrame(preds_test)
+    valid_union=pd.merge(pred_ratings,dftest,on=['user_id','movie_id'])
+    
+    real_rating=valid_union.rating.values
+    estimated=valid_union.pred_rating.values
+    
+    rms = sqrt(mean_squared_error(real_rating, estimated))
+    return rms
+error=evaluation(minidata_test)
+print("error:"+str(error))
